@@ -1,10 +1,12 @@
 # LogCore 🔥
 
 [![PyPI version](https://badge.fury.io/py/logcore.svg)](https://badge.fury.io/py/logcore)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/logcore?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/logcore)
 [![Python versions](https://img.shields.io/pypi/pyversions/logcore.svg)](https://pypi.org/project/logcore/)
 [![CI](https://github.com/SarkarRana/logcore/actions/workflows/ci.yml/badge.svg)](https://github.com/SarkarRana/logcore/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/SarkarRana/logcore/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-sarkarrana.github.io/logcore-blue.svg)](https://sarkarrana.github.io/logcore/)
+
 
 **A production-ready logging library for Python**
 
