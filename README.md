@@ -424,7 +424,7 @@ Measured on Python 3.13, Apple M-series, writing to `/dev/null` (I/O excluded):
 | **LogCore JSON** | **~9.7 µs** | +5.1 µs for structured output |
 | LogCore text | ~9.7 µs | +5.1 µs |
 
-v0.1.7 made the text path ~2.6x faster (25.8 → 9.7 µs) and JSON ~20% faster (12.0 → 9.7 µs). Two things were being paid for on every call: `_find_caller` ran `os.path.abspath` per stack frame — a `getcwd` syscall each time — to compute a value neither formatter emitted, and the text formatter ran a 13-branch case-insensitive regex substitution over every rendered line.
+v0.1.7 made the text path ~2.6x faster (25.8 → 9.9 µs) and JSON ~18% faster (12.0 → 9.8 µs). The dominant cost was the text formatter running a 13-branch case-insensitive regex substitution over every rendered line — worth ~13.9 µs of the ~15.9 µs saved, and the reason text output used to be *slower* than JSON. Smaller wins came from dropping a per-frame `os.path.abspath` (a `getcwd` syscall) that computed a value neither formatter emitted (~1 µs), plus timestamp caching and one less dict allocation per record.
 
 The remaining ~5 µs over stdlib buys correlation IDs, sampling, structured field handling and recursive redaction. If you need to shed it on a hot path, `async_logging=True` moves handler I/O off the calling thread.
 

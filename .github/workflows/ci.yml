@@ -47,8 +47,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,colors,otel]"
 
+      # Benchmarks are excluded here and run in the `benchmark` job instead:
+      # this run is line-traced by coverage, which makes timing meaningless.
       - name: Run tests with pytest
-        run: pytest --cov=logcore --cov-report=xml --cov-report=term-missing
+        run: >-
+          pytest -m "not slow"
+          --cov=logcore --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
@@ -57,6 +61,33 @@ jobs:
           file: ./coverage.xml
           flags: unittests
           name: codecov-umbrella
+
+  benchmark:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,colors,otel]"
+
+      # --no-cov matters: the benchmark compares logcore against stdlib
+      # logging, and coverage line-traces only logcore, which would make the
+      # comparison measure the tracer rather than the library.
+      - name: Run benchmarks
+        run: pytest -m slow --no-cov -p no:cacheprovider
+
+      - name: Report overhead vs stdlib
+        run: python examples/benchmark.py
 
   lint:
     runs-on: ubuntu-latest
@@ -119,7 +150,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          # setuptools/pip come preinstalled on the runner image and go stale
+          # between image refreshes; they are build tooling, not logcore
+          # dependencies (logcore has none), but pip-audit still sees them.
+          python -m pip install --upgrade pip setuptools wheel
           pip install -e ".[dev]"
           pip install bandit pip-audit
 

@@ -686,25 +686,75 @@ class TestPerformance:
     def test_log_call_overhead_is_bounded(self) -> None:
         """Guard against reintroducing per-call getcwd/regex work.
 
-        The ceiling is deliberately loose (CI runners are noisy); it catches
-        order-of-magnitude regressions, not small drifts.
+        Measured *relative to stdlib logging in the same process*, because an
+        absolute microsecond ceiling is not portable: a shared CI runner is
+        several times slower than a developer laptop, and the value would have
+        to be so loose to survive that it would catch nothing.
+
+        Timing is taken as the best of several rounds. The minimum is the
+        robust estimator here — a run can only be slowed by scheduling noise,
+        never speeded up.
         """
         import time
 
-        _loggers.clear()
+        if sys.gettrace() is not None:
+            # coverage.py line-traces logcore and not stdlib logging, so the
+            # ratio below would compare an instrumented path against an
+            # uninstrumented one. Run this without coverage (see the benchmark
+            # job in ci.yml) for a meaningful number.
+            pytest.skip("a tracer is active; per-call timing is meaningless")
+
         devnull = open(os.devnull, "w")
-        log = get_logger("perf1", level="INFO", json=True)
-        for handler in log._logger.handlers:
-            handler.stream = devnull  # type: ignore[attr-defined]
+        try:
+            stdlib_log = logging.getLogger("perf_stdlib_baseline")
+            stdlib_log.handlers = [logging.StreamHandler(devnull)]
+            stdlib_log.setLevel(logging.INFO)
+            stdlib_log.propagate = False
 
-        for _ in range(1000):
-            log.info("warmup", user="alice", count=1)
+            _loggers.clear()
+            json_log = get_logger("perf_json", level="INFO", json=True)
+            for handler in json_log._logger.handlers:
+                handler.stream = devnull  # type: ignore[attr-defined]
 
-        iterations = 20000
-        start = time.perf_counter()
-        for _ in range(iterations):
-            log.info("benchmark", user="alice", count=1)
-        micros = (time.perf_counter() - start) / iterations * 1_000_000
+            text_log = get_logger("perf_text", level="INFO", json=False)
+            for handler in text_log._logger.handlers:
+                handler.stream = devnull  # type: ignore[attr-defined]
 
-        devnull.close()
-        assert micros < 40, f"{micros:.1f} µs/call — expected well under 40"
+            def measure(fn: Any, iterations: int = 5000) -> float:
+                for _ in range(500):  # warm up
+                    fn()
+                best = float("inf")
+                for _ in range(3):
+                    start = time.perf_counter()
+                    for _ in range(iterations):
+                        fn()
+                    best = min(best, time.perf_counter() - start)
+                return best / iterations * 1_000_000
+
+            baseline = measure(lambda: stdlib_log.info("benchmark message"))
+            json_cost = measure(
+                lambda: json_log.info("benchmark", user="alice", count=1)
+            )
+            text_cost = measure(
+                lambda: text_log.info("benchmark", user="alice", count=1)
+            )
+        finally:
+            devnull.close()
+
+        # Both formatters are covered because they regress differently.
+        #
+        # The ceiling was chosen by reintroducing the pre-0.1.7 code and
+        # measuring, not by guesswork:
+        #   - full-line redaction regex in TextFormatter: text -> 5.5x. Caught.
+        #   - per-frame abspath in _find_caller: ~1us/call, ~2.4x. Not caught,
+        #     and deliberately so; that is drift, not a regression worth
+        #     failing a build over.
+        #
+        # Both paths sit at ~2.2x here, so 3.5x leaves room for a slower or
+        # noisier machine while still catching the 5.5x class of regression.
+        for label, cost in (("JSON", json_cost), ("text", text_cost)):
+            ratio = cost / baseline
+            assert ratio < 3.5, (
+                f"logcore {label} is {ratio:.1f}x stdlib "
+                f"({cost:.1f} vs {baseline:.1f} us/call) -- expected < 3.5x"
+            )

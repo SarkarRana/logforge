@@ -82,12 +82,18 @@ logger for a whole process rather than only for the lines you write yourself.
 - Coverage now enforces an 85% floor with branch coverage enabled.
 
 ### Fixed
-- **~2.6x faster text logging** (25.8 → 9.7 µs/call) and ~20% faster JSON
-  (12.0 → 9.7 µs/call), measured by `examples/benchmark.py`. Two causes:
-  `_find_caller` called `os.path.abspath` per stack frame — a `getcwd` syscall
-  each time — to compute a value neither formatter ever emitted; and
-  `TextFormatter` ran a 13-branch `IGNORECASE` regex substitution over every
-  rendered line.
+- **~2.6x faster text logging** (25.8 → 9.9 µs/call) and ~18% faster JSON
+  (12.0 → 9.8 µs/call), measured by `examples/benchmark.py` on Python 3.13.
+  Attribution, measured by reintroducing each change individually rather than
+  inferred from a profiler:
+  - `TextFormatter` ran a 13-branch `IGNORECASE` regex substitution over every
+    rendered line. Removing it accounts for ~13.9 µs of the ~15.9 µs saved on
+    the text path, and is why text output used to be *slower* than JSON.
+  - `_find_caller` called `os.path.abspath` per stack frame — a `getcwd`
+    syscall each time — to compute a value neither formatter ever emitted.
+    Worth ~1 µs/call on both paths: real, but a small share of the total.
+  - The remainder (~1 µs) is timestamp caching, one less dict allocation per
+    record, compact JSON separators and a precomputed level lookup.
 - **Unbounded memory growth in tail-based sampling.** `Sampler` tracked
   correlation IDs in dicts that were never evicted, so any service using
   `set_correlation_id()` (rather than the `with_correlation_id()` context
@@ -123,6 +129,10 @@ logger for a whole process rather than only for the lines you write yourself.
 - Docs are built on pull requests, not only after merge to `main`.
 - Deleted `tests/pytest.ini`, which shadowed the pyproject pytest config and
   silently disabled coverage and asyncio settings for `pytest tests/`.
+- Added `MANIFEST.in`. Without it the sdist fell back to a distutils-era
+  default that shipped `tests/test*.py` but not `conftest.py` or
+  `tests/__init__.py`, so the source distribution's test suite could not be
+  collected. Downstream packagers build from the sdist and run the tests.
 
 ### Notes
 - The PyPI publish step still uses a long-lived `PYPI_API_TOKEN`. Migrating to

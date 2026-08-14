@@ -1,0 +1,29 @@
+# Controls what goes into the source distribution.
+#
+# Without this, setuptools falls back to a distutils-era default that picks up
+# `tests/test*.py` but not `conftest.py` or `tests/__init__.py`, producing an
+# sdist whose test suite cannot be collected. Downstream packagers (Debian,
+# conda-forge, Homebrew) build from the sdist and run the tests, so ship the
+# whole directory or none of it.
+
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include SECURITY.md
+include PROJECT_STRUCTURE.md
+include .flake8
+include py.typed
+
+recursive-include logcore *.py
+include logcore/py.typed
+
+recursive-include tests *.py
+recursive-include examples *.py
+
+# Build artifacts and caches never belong in a source distribution.
+prune docs/_build
+prune htmlcov
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store
