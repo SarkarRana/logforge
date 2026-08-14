@@ -26,6 +26,7 @@ guides/correlation_ids
 guides/sampling
 guides/opentelemetry
 guides/frameworks
+guides/stdlib_interop
 guides/redaction
 ```
 

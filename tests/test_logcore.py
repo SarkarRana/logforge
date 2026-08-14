@@ -16,6 +16,8 @@ from logcore.config import LogCoreConfig, create_config
 from logcore.formatters import JSONFormatter, TextFormatter
 from logcore.handlers import ConsoleHandler, FileHandler
 
+from .conftest import close_logcore_handlers
+
 
 class TestConfiguration:
     """Test configuration functionality."""
@@ -147,9 +149,13 @@ class TestHandlers:
             handler = FileHandler(config, str(log_file))
             log_handler = handler.get_handler()
 
-            assert isinstance(log_handler, logging.handlers.RotatingFileHandler)
-            assert log_handler.maxBytes == 1024
-            assert log_handler.backupCount == 3
+            try:
+                assert isinstance(log_handler, logging.handlers.RotatingFileHandler)
+                assert log_handler.maxBytes == 1024
+                assert log_handler.backupCount == 3
+            finally:
+                # Windows cannot remove the temp dir while the file is open.
+                log_handler.close()
 
 
 class TestUtils:
@@ -219,6 +225,7 @@ class TestLogger:
                 assert data["success"] is True
 
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     def test_exception_logging(self):
@@ -244,6 +251,7 @@ class TestLogger:
                 assert "ZeroDivisionError" in data["exception"]
 
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     def test_timer_context_manager(self):
@@ -272,6 +280,7 @@ class TestLogger:
             assert end_data["duration_ms"] >= 100  # At least 100ms
 
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     def test_file_rotation(self):
@@ -291,6 +300,8 @@ class TestLogger:
             # Check that rotation occurred
             rotated_files = list(Path(tmpdir).glob("rotate_test.log*"))
             assert len(rotated_files) > 1  # Should have main file + rotated files
+
+            close_logcore_handlers()
 
     def test_thread_safety(self):
         """Test thread safety of logging."""
@@ -377,6 +388,7 @@ class TestLogger:
                 assert data["role"] == "admin"
 
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
 
@@ -448,7 +460,9 @@ class TestPartialMasking:
 
         output = formatter.format(record)
         assert "mypassword" not in output
-        assert 'password="my***"' in output
+        # Redaction is structural now, so the masked value is rendered like any
+        # other extra (key=value) instead of being re-quoted by a regex pass.
+        assert "password=my***" in output
 
     def test_text_formatter_no_stdlib_noise(self):
         """TextFormatter should not emit stdlib LogRecord internals as extras."""
@@ -501,6 +515,7 @@ class TestOpenTelemetry:
             assert len(data["trace_id"]) == 32  # 128-bit hex
             assert len(data["span_id"]) == 16  # 64-bit hex
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     def test_no_trace_ids_outside_span(self):
@@ -517,6 +532,7 @@ class TestOpenTelemetry:
             assert "trace_id" not in data
             assert "span_id" not in data
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     def test_trace_id_absent_after_span_exits(self):
@@ -545,6 +561,7 @@ class TestOpenTelemetry:
             assert "trace_id" in inside
             assert "trace_id" not in outside
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
 
@@ -582,6 +599,7 @@ class TestAsync:
             assert isinstance(end["duration_ms"], (int, float))
             assert end["duration_ms"] >= 50
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     @pytest.mark.asyncio
@@ -611,6 +629,7 @@ class TestAsync:
             assert "Failed failing_op" in error_entry["message"]
             assert isinstance(error_entry["duration_ms"], (int, float))
         finally:
+            close_logcore_handlers()
             os.unlink(log_file)
 
     @pytest.mark.asyncio

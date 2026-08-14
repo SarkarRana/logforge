@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "logcore"
-version = "0.1.6"
+version = "0.1.7"
 description = "A production-ready structured logging library for Python"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -24,8 +24,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Logging",
+    "Typing :: Typed",
 ]
 keywords = ["logging", "structured-logging", "json", "observability", "microservices"]
 requires-python = ">=3.9"
@@ -92,6 +94,8 @@ known_first_party = ["logcore"]
 skip_glob = [".*", "build/*", "dist/*"]
 
 [tool.mypy]
+# requires-python is >=3.9, but current mypy refuses to target anything below
+# 3.10. Actual 3.9 compatibility is enforced by the CI test matrix instead.
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
@@ -128,6 +132,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html:htmlcov",
     "--cov-report=xml",
+    "--cov-fail-under=85",
 ]
 asyncio_default_fixture_loop_scope = "function"
 markers = [
@@ -138,6 +143,7 @@ markers = [
 [tool.coverage.run]
 source = ["logcore"]
 omit = ["tests/*", "setup.py"]
+branch = true
 
 [tool.coverage.report]
 exclude_lines = [

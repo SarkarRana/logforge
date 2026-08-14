@@ -71,11 +71,14 @@ class Timer:
         duration = self.end_time - self.start_time
 
         if exc_type is not None:
+            # Pass the live exception rather than str(exc_val): the formatters
+            # turn exc_info into a real traceback plus exception_type /
+            # exception_message, where a bare string loses all of it.
             self.logger._log(
                 "ERROR",
                 f"Failed {self.operation_name}",
                 duration_ms=round(duration * 1000, 2),
-                exception=str(exc_val) if exc_val else None,
+                exc_info=(exc_type, exc_val, exc_tb) if exc_val else False,
                 **self.extra_fields,
             )
         else:
@@ -123,11 +126,14 @@ class AsyncTimer:
         duration = self.end_time - self.start_time
 
         if exc_type is not None:
+            # Pass the live exception rather than str(exc_val): the formatters
+            # turn exc_info into a real traceback plus exception_type /
+            # exception_message, where a bare string loses all of it.
             self.logger._log(
                 "ERROR",
                 f"Failed {self.operation_name}",
                 duration_ms=round(duration * 1000, 2),
-                exception=str(exc_val) if exc_val else None,
+                exc_info=(exc_type, exc_val, exc_tb) if exc_val else False,
                 **self.extra_fields,
             )
         else:

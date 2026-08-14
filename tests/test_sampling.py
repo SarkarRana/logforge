@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import random
+import warnings
 from typing import List
 from unittest.mock import patch
 
@@ -316,13 +317,19 @@ class TestEnvVars:
                 os.environ.pop(k, None)
             assert sampler_from_env() is None
 
-    def test_invalid_rate_silently_ignored(self) -> None:
+    def test_invalid_rate_warns_and_falls_back(self) -> None:
         with patch.dict(
             os.environ, {"LOGCORE_SAMPLE_RATE": "not-a-number"}, clear=False
         ):
-            s = sampler_from_env()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                s = sampler_from_env()
+
         assert s is not None
         assert s.rate == 1.0  # default
+        # Falling back silently meant a typo shipped 100% of logs in
+        # production with nothing to point at.
+        assert any("LOGCORE_SAMPLE_RATE" in str(w.message) for w in caught)
 
 
 class TestStats:

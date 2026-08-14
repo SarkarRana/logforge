@@ -15,6 +15,11 @@ Everything below is auto-generated from the docstrings in the source. Private me
    LogLevel
    set_correlation_id
    get_correlation_id
+   configure_stdlib
+   CorrelationIdMiddleware
+   WSGICorrelationIdMiddleware
+   flush
+   shutdown
 ```
 
 ## Logger
@@ -126,4 +131,48 @@ Everything below is auto-generated from the docstrings in the source. Private me
 
 ```{eval-rst}
 .. autofunction:: logcore.handlers.create_handlers
+```
+
+## Lifecycle
+
+Only relevant when `async_logging=True` moves handler I/O onto a background
+thread. `shutdown` is registered with `atexit`; call it explicitly before a hard
+exit that skips `atexit` handlers.
+
+```{eval-rst}
+.. autofunction:: logcore.handlers.flush
+```
+
+```{eval-rst}
+.. autofunction:: logcore.handlers.shutdown
+```
+
+```{eval-rst}
+.. autofunction:: logcore.handlers.dropped_record_count
+```
+
+## Standard library interop
+
+```{eval-rst}
+.. autofunction:: logcore.interop.configure_stdlib
+```
+
+```{eval-rst}
+.. autofunction:: logcore.interop.reset_stdlib
+```
+
+```{eval-rst}
+.. autofunction:: logcore.interop.dict_config_formatter
+```
+
+## Web middleware
+
+```{eval-rst}
+.. autoclass:: logcore.middleware.CorrelationIdMiddleware
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: logcore.middleware.WSGICorrelationIdMiddleware
+   :members:
 ```

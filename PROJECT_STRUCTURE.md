@@ -19,29 +19,40 @@ LogCore is a production-ready logging library for Python that provides:
 ## File Structure
 
 ```
-logcore/
+logcore/                        # The installable package
 ├── __init__.py                 # Package initialization and public API
 ├── config.py                   # Configuration management
 ├── formatters.py               # JSON and text formatters with redaction
-├── handlers.py                 # Console and file handlers
+├── handlers.py                 # Console, file and queue handlers
 ├── logger.py                   # Main logger implementation
+├── sampling.py                 # Rate/level/tail-based log sampling
+├── interop.py                  # stdlib logging capture (configure_stdlib)
+├── middleware.py               # ASGI and WSGI correlation-ID middleware
 ├── utils.py                    # Utilities (correlation IDs, timers)
-├── py.typed                    # Type hints marker
-│
+└── py.typed                    # Type hints marker
+
+<repo root>/
 ├── tests/
 │   ├── __init__.py
-│   ├── pytest.ini
-│   └── test_logcore.py        # Comprehensive test suite
+│   ├── test_logcore.py         # Core logger, formatter and handler tests
+│   ├── test_sampling.py        # Sampler tests
+│   ├── test_hardening.py       # Perf, redaction, interop and middleware tests
+│   └── conftest.py             # Shared fixtures and handler cleanup
+│
+├── docs/                       # Sphinx site (MyST markdown), deployed to Pages
 │
 ├── examples/
 │   ├── basic.py                # Basic usage examples
+│   ├── benchmark.py            # Overhead vs stdlib logging
+│   ├── integration_example.py  # stdlib capture, middleware, async logging
 │   ├── flask_example.py        # Flask web framework integration
 │   └── microservice_example.py # Microservice architecture demo
 │
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml              # CI/CD pipeline
-│       └── release.yml         # Release workflow
+│       ├── ci.yml              # Tests, lint, types, security, build, docs
+│       ├── docs.yml            # Docs deploy to GitHub Pages
+│       └── release.yml         # Verify, build, GitHub release, PyPI publish
 │
 ├── pyproject.toml              # Package configuration
 ├── README.md                   # Main documentation

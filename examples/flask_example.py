@@ -5,6 +5,12 @@ Flask web application example demonstrating LogCore integration.
 This example shows how to integrate LogCore with a Flask web application
 including request logging, correlation IDs, error handling, and structured logging.
 
+It wires correlation IDs by hand to show the mechanics. Since v0.1.7 you can
+skip all of that with the shipped middleware -- see integration_example.py:
+
+    from logcore import WSGICorrelationIdMiddleware
+    app.wsgi_app = WSGICorrelationIdMiddleware(app.wsgi_app, logger=log)
+
 Run with: python examples/flask_example.py
 """
 

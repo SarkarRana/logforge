@@ -15,13 +15,14 @@ LogCore provides a simple, structured, and extensible logging solution that work
 ## ✨ Features
 
 - **🚀 Simple API**: Single entrypoint with intuitive configuration
-- **📊 Structured Logging**: JSON and human-readable output formats
-- **🔗 Correlation IDs**: Built-in request tracing support
+- **📊 Structured Logging**: JSON and human-readable output formats; nested dicts and lists stay real JSON
+- **🔗 Correlation IDs**: Built-in request tracing, with ASGI/WSGI middleware included
 - **⏱️ Built-in Timing**: Context managers for performance monitoring
-- **🛡️ Security**: Automatic redaction of sensitive fields
+- **🛡️ Security**: Recursive redaction of sensitive fields, at any nesting depth
+- **🔌 stdlib Interop**: Capture third-party library logs through the same formatters
 - **📁 File Rotation**: Configurable log rotation and archival
-- **🎨 Colorized Output**: Beautiful console logging with colors
-- **⚡ Async Support**: Safe for asyncio applications
+- **🎨 Colorized Output**: Beautiful console logging with colors (honors `NO_COLOR`)
+- **⚡ Async Support**: Safe for asyncio applications, with opt-in non-blocking delivery
 - **🧵 Thread-safe**: Concurrent logging without issues
 - **🌍 Environment Configuration**: Configure via environment variables
 
@@ -88,21 +89,33 @@ Calling `get_logger` with the same name a second time and no extra arguments ret
 
 ```python
 from logcore import (
-    get_logger,
-    LogLevel,
-    Sampler,
-    set_correlation_id,
-    get_correlation_id,
+    get_logger, LogCoreLogger, LogLevel, LogCoreConfig,
+    set_correlation_id, get_correlation_id, correlation_id_context,
+    Timer, AsyncTimer,
+    JSONFormatter, TextFormatter,
+    Sampler, SamplerStats, Decision,
+    configure_stdlib, reset_stdlib, dict_config_formatter,
+    CorrelationIdMiddleware, WSGICorrelationIdMiddleware,
+    flush, shutdown, dropped_record_count,
 )
 ```
 
 | Symbol | Description |
 |---|---|
 | `get_logger(name, ...)` | Create or retrieve a logger |
+| `LogCoreLogger` | The type `get_logger` returns — for type annotations |
 | `LogLevel` | Enum of valid log levels (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 | `Sampler(rate, always_keep, tail_based, ...)` | Configurable sampler combining rate-based, level-aware, and tail-based sampling |
 | `set_correlation_id(id)` | Set a correlation ID on the current context (thread/task) without a logger instance |
 | `get_correlation_id()` | Read the current correlation ID, or `None` if unset |
+| `correlation_id_context(id)` | Context manager binding an ID for a scope, with proper reset |
+| `JSONFormatter` / `TextFormatter` | Standard `logging.Formatter` subclasses, usable in `dictConfig` |
+| `configure_stdlib(...)` | Route the stdlib root logger through LogCore's formatters |
+| `dict_config_formatter(...)` | A `dictConfig` formatter entry for LogCore |
+| `CorrelationIdMiddleware` | ASGI correlation-ID middleware |
+| `WSGICorrelationIdMiddleware` | WSGI correlation-ID middleware |
+| `flush()` / `shutdown()` | Drain and stop background queue listeners (`async_logging=True`) |
+| `dropped_record_count()` | Records shed by a full async queue |
 
 `set_correlation_id` and `get_correlation_id` are useful in middleware that sets the ID before a logger is available:
 
@@ -123,7 +136,11 @@ export LOGCORE_JSON=true
 export LOGCORE_FILE=/var/log/app.log
 export LOGCORE_CORRELATION_ID=req-abc-123
 export LOGCORE_REDACT_FIELDS=password,token,secret
+export LOGCORE_CONSOLE_STREAM=stdout   # default: stderr
+export LOGCORE_ASYNC=true              # non-blocking delivery
 ```
+
+An invalid value emits a `UserWarning` and falls back to the default rather than being silently ignored — a typo'd `LOGCORE_SAMPLE_RATE` used to mean shipping 100% of your logs with nothing to indicate why.
 
 ### Output Formats
 
@@ -197,6 +214,18 @@ log.info("User data", username="alice", password="secret123", token="abc123", ro
 ```
 
 Values of 4 characters or fewer are fully redacted (`[REDACTED]`). Longer values reveal a short prefix so you can correlate log lines without exposing the secret.
+
+Redaction is **recursive** — it descends into nested dicts and lists at any depth:
+
+```python
+log.info("login", user={"name": "bob", "password": "hunter2secret"},
+         tokens=[{"token": "abcdefghij"}])
+# {"user":{"name":"bob","password":"hun***"},"tokens":[{"token":"ab***"}]}
+```
+
+> **Upgrading from ≤0.1.6:** nested values were stringified before the redactor ran, so secrets inside a dict or list were logged in **cleartext**. If you log structured payloads, upgrade.
+
+Secrets written into the message itself (`log.info("password=hunter2")`) are masked too, in both output formats.
 
 Default redacted fields: `password`, `passwd`, `secret`, `token`, `key`, `api_key`, `access_token`, `auth`, `authorization`, `credential`, `private_key`, `cert`, `certificate`.
 
@@ -321,85 +350,83 @@ async def main():
 asyncio.run(main())
 ```
 
+### Capturing Third-Party Logs
+
+`get_logger` only formats the records *you* emit. Everything uvicorn, sqlalchemy, requests or celery logs goes through the stdlib root logger, so in a JSON pipeline half your output is unparseable. `configure_stdlib()` fixes that in one call at startup:
+
+```python
+import logcore
+
+logcore.configure_stdlib(
+    level="INFO",
+    json=True,
+    quiet=["urllib3", ("botocore", "ERROR")],  # turn down noisy libraries
+)
+```
+
+Now every record in the process — yours and everyone else's — uses the same format and the same redaction rules.
+
+Configuring logging declaratively instead? `logcore.dict_config_formatter()` returns a `dictConfig` formatter entry.
+
 ### Integration with Web Frameworks
 
-#### Flask Example
+The middleware is zero-dependency — it imports no web framework.
+
+#### FastAPI / Starlette (ASGI)
 
 ```python
-from flask import Flask, request, g
-from logcore import get_logger
-import uuid
+from fastapi import FastAPI
+from logcore import CorrelationIdMiddleware, get_logger
 
-app = Flask(__name__)
-log = get_logger("webapp")
-
-@app.before_request
-def before_request():
-    g.correlation_id = request.headers.get('X-Correlation-ID', str(uuid.uuid4()))
-
-@app.after_request
-def after_request(response):
-    with log.with_correlation_id(g.correlation_id):
-        log.info(
-            "Request completed",
-            method=request.method,
-            path=request.path,
-            status_code=response.status_code,
-            duration_ms=...  # Add timing logic
-        )
-    return response
-
-@app.route('/users/<user_id>')
-def get_user(user_id):
-    with log.with_correlation_id(g.correlation_id):
-        log.info("Fetching user", user_id=user_id)
-        # ... your logic here
-```
-
-#### FastAPI Example
-
-```python
-from fastapi import FastAPI, Request
-from logcore import get_logger
-import time
-import uuid
-
+log = get_logger("api", json=True)
 app = FastAPI()
-log = get_logger("api")
+app.add_middleware(CorrelationIdMiddleware, logger=log)
 
-@app.middleware("http")
-async def logging_middleware(request: Request, call_next):
-    correlation_id = request.headers.get("x-correlation-id", str(uuid.uuid4()))
-    start_time = time.time()
-
-    with log.with_correlation_id(correlation_id):
-        log.info("Request started", method=request.method, url=str(request.url))
-
-        response = await call_next(request)
-
-        duration = (time.time() - start_time) * 1000
-        log.info(
-            "Request completed",
-            status_code=response.status_code,
-            duration_ms=round(duration, 2)
-        )
-
-    response.headers["x-correlation-id"] = correlation_id
-    return response
+@app.get("/users/{user_id}")
+async def get_user(user_id: str):
+    log.info("Fetching user", user_id=user_id)  # carries the request's ID
+    return {"id": user_id}
 ```
+
+#### Flask / Django (WSGI)
+
+```python
+from flask import Flask
+from logcore import WSGICorrelationIdMiddleware, get_logger
+
+log = get_logger("webapp", json=True)
+app = Flask(__name__)
+app.wsgi_app = WSGICorrelationIdMiddleware(app.wsgi_app, logger=log)
+```
+
+Both adopt an inbound `X-Request-ID` (falling back to the W3C `traceparent` trace-id, or generating a UUID), bind it for the request, echo it on the response, and release the correlation scope on the way out. Passing `logger=` is what releases tail-sampling buffers — without it a service using tail-based sampling accumulates one buffer per request.
+
+Inbound IDs are validated against `[A-Za-z0-9._:-]{1,128}`, so a client cannot inject newlines into your logs or response headers.
+
+### Non-Blocking Logging
+
+By default a log call writes and flushes on the calling thread. To move that off the hot path:
+
+```python
+log = get_logger("api", json=True, async_logging=True)  # or LOGCORE_ASYNC=true
+```
+
+Handler I/O runs on a background thread behind a bounded queue. When the queue is full, records are dropped rather than blocking the caller — `logcore.dropped_record_count()` reports how many. Call `logcore.shutdown()` before a hard exit; the `atexit` hook only covers normal termination.
 
 ## ⚡ Performance
 
-Measured on Python 3.12, Apple M-series, writing to `/dev/null` (I/O excluded):
+Measured on Python 3.13, Apple M-series, writing to `/dev/null` (I/O excluded):
 
 | Mode | µs / call | Notes |
 |---|---|---|
-| stdlib `logging` (text) | ~6 µs | baseline |
-| stdlib + manual JSON formatter | ~7 µs | +1 µs |
-| **LogCore JSON** | **~13 µs** | +7 µs for structured output |
-| LogCore text (colored) | ~36 µs | +30 µs for strftime + color |
+| stdlib `logging` (text) | ~4.6 µs | baseline |
+| stdlib + manual JSON formatter | ~5.5 µs | +0.9 µs |
+| **LogCore JSON** | **~9.7 µs** | +5.1 µs for structured output |
+| LogCore text | ~9.7 µs | +5.1 µs |
 
-JSON mode is the recommended default for production — it costs ~7 µs per call over stdlib and produces machine-readable output that log aggregators can query directly.
+v0.1.7 made the text path ~2.6x faster (25.8 → 9.7 µs) and JSON ~20% faster (12.0 → 9.7 µs). Two things were being paid for on every call: `_find_caller` ran `os.path.abspath` per stack frame — a `getcwd` syscall each time — to compute a value neither formatter emitted, and the text formatter ran a 13-branch case-insensitive regex substitution over every rendered line.
+
+The remaining ~5 µs over stdlib buys correlation IDs, sampling, structured field handling and recursive redaction. If you need to shed it on a hot path, `async_logging=True` moves handler I/O off the calling thread.
 
 Run the benchmark yourself: `python examples/benchmark.py`
 
@@ -488,12 +515,17 @@ Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
 - [x] **Reconfiguration warning**: `get_logger` emits `UserWarning` when replacing a cached logger (v0.1.5)
 - [x] **`LogLevel`, `set_correlation_id`, `get_correlation_id`** promoted to top-level public API (v0.1.5)
 - [x] **Log sampling**: Rate-based, level-aware, and tail-based sampling with per-correlation-id buffering (v0.1.6)
+- [x] **stdlib interop**: `configure_stdlib()` routes third-party library logs through LogCore's formatters (v0.1.7)
+- [x] **Web middleware**: Zero-dependency ASGI and WSGI correlation-ID middleware (v0.1.7)
+- [x] **Non-blocking delivery**: Opt-in `async_logging=True` moves handler I/O to a background thread (v0.1.7)
+- [x] **Recursive redaction**: Secrets masked at any nesting depth, in dicts and lists (v0.1.7)
 
 ### Planned
+- [ ] **`logger.bind()`**: Child loggers carrying persistent context fields
 - [ ] **Sentry integration**: Automatic error forwarding with structured context
-- [ ] **Async batching**: Buffer and flush writes for lower-latency hot paths
 - [ ] **OTLP export**: Direct log shipping to OpenTelemetry collectors
 - [ ] **Kubernetes metadata**: Pod/node/namespace injection via downward API env vars
+- [ ] **Per-level sample rates**: e.g. 100% ERROR, 10% INFO, 1% DEBUG
 
 ## 💖 Support
 

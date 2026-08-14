@@ -59,7 +59,7 @@ class UserService:
         with user_service_log.with_correlation_id(correlation_id):
             user_service_log.info("User lookup requested", user_id=user_id)
 
-            with user_service_log.time("user_lookup", user_id=user_id):
+            async with user_service_log.time("user_lookup", user_id=user_id):
                 # Simulate database lookup
                 await asyncio.sleep(0.05)
 
@@ -118,7 +118,7 @@ class OrderService:
                 total_amount=total_amount,
             )
 
-            with order_service_log.time("order_creation", order_id=order_id):
+            async with order_service_log.time("order_creation", order_id=order_id):
                 # Simulate order processing
                 await asyncio.sleep(0.1)
 
@@ -178,7 +178,7 @@ class PaymentService:
                 user_id=order.user_id,
             )
 
-            with payment_service_log.time(
+            async with payment_service_log.time(
                 "payment_processing", order_id=order.id, amount=order.total_amount
             ):
                 # Simulate payment processing
@@ -222,7 +222,7 @@ class NotificationService:
                 notification_type="order_confirmation",
             )
 
-            with notification_service_log.time(
+            async with notification_service_log.time(
                 "notification_send",
                 notification_type="order_confirmation",
                 user_id=user.id,
@@ -250,7 +250,7 @@ class NotificationService:
                 notification_type="payment_failure",
             )
 
-            with notification_service_log.time(
+            async with notification_service_log.time(
                 "notification_send",
                 notification_type="payment_failure",
                 user_id=user.id,
@@ -287,7 +287,9 @@ class APIGateway:
             )
 
             try:
-                with api_gateway_log.time("full_order_processing", user_id=user_id):
+                async with api_gateway_log.time(
+                    "full_order_processing", user_id=user_id
+                ):
                     # Step 1: Validate user
                     user = await self.user_service.get_user(user_id, correlation_id)
                     if not user:
@@ -398,7 +400,7 @@ async def simulate_load_test(gateway: APIGateway, num_requests: int = 10):
         tasks.append(task)
 
     # Execute all requests concurrently
-    with api_gateway_log.time("load_test_execution", num_requests=num_requests):
+    async with api_gateway_log.time("load_test_execution", num_requests=num_requests):
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Analyze results

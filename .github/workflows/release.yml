@@ -5,8 +5,48 @@ on:
     tags:
       - "v*.*.*"
 
+permissions:
+  contents: read
+
 jobs:
-  release:
+  # A tag used to go straight to PyPI without running anything. Gate the
+  # release on the same checks a PR has to pass.
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,colors,otel]"
+
+      - name: Run tests
+        run: pytest
+
+      - name: Lint
+        run: |
+          black --check logcore tests examples
+          isort --check-only logcore tests examples
+          flake8 logcore tests examples
+
+      - name: Type check
+        run: mypy logcore
+
+  build:
+    needs: [verify]
     runs-on: ubuntu-latest
 
     steps:
@@ -19,28 +59,89 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
           pip install build twine
 
-      - name: Build package
+      - name: Verify tag matches package version
         run: |
-          python -m build
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag $TAG does not match pyproject version $PKG"
+            exit 1
+          fi
 
-      - name: Generate changelog
-        id: changelog
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
         run: |
-          echo "## What's Changed" > changelog.md
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
-          git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" >> changelog.md
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Pull this version's section out of the hand-written changelog
+          # rather than dumping raw commit subjects.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG entry for $VERSION; falling back to commit log."
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+            git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" > release-notes.md
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: changelog.md
+          body_path: release-notes.md
           files: dist/*
 
+  publish:
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/logcore
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Recommended follow-up: switch to PyPI Trusted Publishing (OIDC) to
+      # retire this long-lived token. That needs a one-time publisher entry on
+      # PyPI first, so it is deliberately not done here — see CHANGELOG.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

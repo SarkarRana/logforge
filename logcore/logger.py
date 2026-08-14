@@ -29,24 +29,102 @@ from .utils import (
     set_correlation_id,
 )
 
-_srcfile = os.path.normcase(os.path.abspath(__file__))
+_srcfile = os.path.normcase(__file__)
+_utilsfile = os.path.normcase(os.path.join(os.path.dirname(__file__), "utils.py"))
+
+# Files whose frames are skipped when attributing a log record to its caller.
+_internal_files = frozenset({_srcfile, _utilsfile})
+
+# co_filename -> normcase(co_filename). normcase is pure string work but it is
+# not free at ~1M calls/minute, and the set of source files is tiny and stable.
+_normcase_cache: Dict[str, str] = {}
 
 
-def _find_caller() -> Tuple[str, int, str]:
-    """Return (filename, lineno, funcname) of the first caller outside this module."""
+def _find_caller(stacklevel: int = 1) -> Tuple[str, int, str]:
+    """Return (filename, lineno, funcname) of the first caller outside logcore.
+
+    Mirrors ``logging.Logger.findCaller``: compares ``co_filename`` against
+    precomputed module paths rather than calling ``os.path.abspath``, which
+    issues a ``getcwd`` syscall per frame.
+
+    ``stacklevel`` skips additional frames once the first external frame is
+    found, so wrappers can attribute a record to their own caller.
+    """
     try:
-        frame: Optional[FrameType] = sys._getframe(0)
-    except AttributeError:
+        frame: Optional[FrameType] = sys._getframe(1)
+    except (AttributeError, ValueError):  # pragma: no cover - CPython always has it
         return "(unknown file)", 0, "(unknown function)"
+
     while frame is not None:
-        if os.path.normcase(os.path.abspath(frame.f_code.co_filename)) != _srcfile:
+        co_filename = frame.f_code.co_filename
+        normalized = _normcase_cache.get(co_filename)
+        if normalized is None:
+            normalized = os.path.normcase(co_filename)
+            _normcase_cache[co_filename] = normalized
+
+        if normalized not in _internal_files:
+            # First frame outside logcore. Honor any extra stacklevel from here.
+            for _ in range(stacklevel - 1):
+                if frame.f_back is None:
+                    break
+                frame = frame.f_back
             return frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name
+
         frame = frame.f_back
+
     return "(unknown file)", 0, "(unknown function)"
 
 
 _logger_lock = threading.RLock()
 _loggers: Dict[str, "LogCoreLogger"] = {}
+
+# Level name -> numeric level, resolved once instead of getattr(logging, ...)
+# on every call.
+_LEVEL_NUMBERS: Dict[str, int] = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+    "FATAL": logging.CRITICAL,
+}
+
+# Values passed through to the formatter unchanged. dict/list/tuple are kept
+# structured so JSON output is machine-parseable and the redactor can recurse.
+_PASSTHROUGH_TYPES = (str, bool, int, float, type(None), dict, list, tuple)
+
+# LogRecord attributes a user field must not overwrite. Includes names present
+# only on some Python versions (taskName landed in 3.12).
+_RESERVED_RECORD_FIELDS = frozenset(
+    {
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "taskName",
+        "thread",
+        "threadName",
+    }
+)
+
+_warned_reserved_keys: Set[str] = set()
 
 
 class LogCoreLogger:
@@ -57,7 +135,19 @@ class LogCoreLogger:
         self._logger = logging.getLogger(f"logcore.{config.name}")
         self._logger.setLevel(getattr(logging, config.level.value))
 
-        self._logger.handlers.clear()
+        # Records are emitted by our own handlers. Propagating them to the root
+        # logger as well makes every line appear twice as soon as anything in
+        # the process calls logging.basicConfig().
+        self._logger.propagate = config.propagate
+
+        # clear() drops the references without closing them, leaking a file
+        # descriptor per reconfiguration when a file handler is attached.
+        for old_handler in list(self._logger.handlers):
+            self._logger.removeHandler(old_handler)
+            try:
+                old_handler.close()
+            except Exception:  # pragma: no cover - handler close is best effort
+                pass
 
         handlers = create_handlers(config)
         for handler in handlers:
@@ -69,16 +159,30 @@ class LogCoreLogger:
 
     def _log(self, level: str, message: str, *args: Any, **kwargs: Any) -> None:
         exc_info = kwargs.pop("exc_info", False)
+        stacklevel = kwargs.pop("stacklevel", 1)
 
-        numeric_level = getattr(logging, level.upper(), logging.INFO)
+        numeric_level = _LEVEL_NUMBERS.get(level, logging.INFO)
 
         if not self._logger.isEnabledFor(numeric_level):
             return
 
+        correlation_id = get_correlation_id()
+
+        # Decide before building the record. A dropped record should not pay for
+        # frame inspection, makeRecord, the OTel span lookup, or field coercion.
+        sampler = self.sampler
+        decision = Decision.KEEP
+        if sampler is not None:
+            decision = sampler.decide_early(numeric_level, correlation_id)
+            if decision is Decision.DROP:
+                return
+
         if exc_info is True:
             exc_info = sys.exc_info()
+        elif isinstance(exc_info, BaseException):
+            exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
 
-        fn, lno, func = _find_caller()
+        fn, lno, func = _find_caller(stacklevel)
         record = self._logger.makeRecord(
             self._logger.name,
             numeric_level,
@@ -90,7 +194,6 @@ class LogCoreLogger:
             func=func,
         )
 
-        correlation_id = get_correlation_id()
         if correlation_id:
             record.correlation_id = correlation_id
 
@@ -102,26 +205,47 @@ class LogCoreLogger:
                     record.trace_id = format(_ctx.trace_id, "032x")
                     record.span_id = format(_ctx.span_id, "016x")
 
-        for key, value in kwargs.items():
-            if not hasattr(record, key):
-                if isinstance(value, (bool, int, float, type(None))):
-                    setattr(record, key, value)
-                else:
-                    setattr(record, key, safe_str(value))
+        if kwargs:
+            self._attach_extras(record, kwargs)
 
-        if self.sampler is not None:
-            decision = self.sampler.decide(record)
-            if decision is Decision.DROP:
-                self.sampler._record_dropped()
-                return
+        if sampler is not None:
             if decision is Decision.BUFFER:
-                self.sampler.buffer(record)
+                sampler.buffer(record, correlation_id)
                 return
-            for buffered in self.sampler.flush_pending(record):
+            for buffered in sampler.flush_pending(record, correlation_id):
                 self._logger.handle(buffered)
-            self.sampler._record_kept()
 
         self._logger.handle(record)
+
+    @staticmethod
+    def _attach_extras(record: logging.LogRecord, extras: Dict[str, Any]) -> None:
+        """Merge user-supplied fields onto ``record``.
+
+        Structured values (dict/list/tuple) are kept intact so JSON output stays
+        machine-parseable and the redactor can walk into them. Only genuinely
+        opaque objects are stringified.
+
+        Keys that collide with a LogRecord attribute are stored under ``key_``
+        rather than being dropped, and warn once per key.
+        """
+        for key, value in extras.items():
+            target = key
+            if key in _RESERVED_RECORD_FIELDS or hasattr(record, key):
+                target = f"{key}_"
+                if key not in _warned_reserved_keys:
+                    _warned_reserved_keys.add(key)
+                    warnings.warn(
+                        f"Log field '{key}' collides with a reserved LogRecord "
+                        f"attribute and was emitted as '{target}' instead. "
+                        "Rename the field to silence this warning.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+
+            if isinstance(value, _PASSTHROUGH_TYPES):
+                setattr(record, target, value)
+            else:
+                setattr(record, target, safe_str(value))
 
     def debug(self, message: str, *args: Any, **kwargs: Any) -> None:
         self._log("DEBUG", message, *args, **kwargs)
@@ -142,8 +266,16 @@ class LogCoreLogger:
         self._log("CRITICAL", message, *args, **kwargs)
 
     def exception(self, message: str, *args: Any, **kwargs: Any) -> None:
-        kwargs["exc_info"] = True
+        kwargs.setdefault("exc_info", True)
         self.error(message, *args, **kwargs)
+
+    def flush(self) -> None:
+        """Flush all handlers attached to this logger."""
+        for handler in list(self._logger.handlers):
+            try:
+                handler.flush()
+            except Exception:  # pragma: no cover - flush is best effort
+                pass
 
     def time(
         self, operation_name: str, level: str = "INFO", **kwargs: Any
@@ -228,6 +360,11 @@ def get_logger(
     redact_fields: Optional[Set[str]] = None,
     sampler: Optional[Sampler] = None,
     sample_rate: Optional[float] = None,
+    propagate: Optional[bool] = None,
+    console: Optional[bool] = None,
+    console_stream: Optional[str] = None,
+    async_logging: Optional[bool] = None,
+    queue_size: Optional[int] = None,
 ) -> "LogCoreLogger":
     """Return a LogCoreLogger for the given name, creating it if needed.
 
@@ -259,6 +396,11 @@ def get_logger(
                     redact_fields,
                     sampler,
                     sample_rate,
+                    propagate,
+                    console,
+                    console_stream,
+                    async_logging,
+                    queue_size,
                 ]
             ):
                 return existing_logger
@@ -282,6 +424,11 @@ def get_logger(
             redact_fields=redact_fields,
             sampler=sampler,
             sample_rate=sample_rate,
+            propagate=propagate,
+            console=console,
+            console_stream=console_stream,
+            async_logging=async_logging,
+            queue_size=queue_size,
         )
 
         logger = LogCoreLogger(config)
